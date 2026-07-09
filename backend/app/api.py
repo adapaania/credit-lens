@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.graph import run_agent
 from app.config import get_settings
+from app.memo import generate_memo
 
 
 router = APIRouter()
@@ -34,6 +35,32 @@ class ChatResponse(BaseModel):
     citations: List[Citation] = []
 
 
+class MemoRequest(BaseModel):
+    filing_id: str = Field(..., min_length=1)
+
+
+class CitedFigureResponse(BaseModel):
+    value: float | None = None
+    page: int | None = None
+    section: str | None = None
+
+
+class RatiosResponse(BaseModel):
+    current_ratio: float | None = None
+    net_margin: float | None = None
+    cash_to_debt: float | None = None
+    debt_to_revenue: float | None = None
+
+
+class MemoResponse(BaseModel):
+    company: str | None = None
+    fiscal_year: int | None = None
+    figures: dict[str, CitedFigureResponse]
+    ratios: RatiosResponse
+    narrative: str
+    citations: List[Citation] = []
+
+
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     settings = get_settings()
@@ -53,3 +80,9 @@ def chat(request: ChatRequest) -> ChatResponse:
 
     result = run_agent(request.message, filing_id=request.filing_id, thread_id=request.thread_id)
     return ChatResponse(answer=result["answer"], citations=result["citations"])
+
+
+@router.post("/memo", response_model=MemoResponse)
+def memo(request: MemoRequest) -> MemoResponse:
+    result = generate_memo(request.filing_id)
+    return MemoResponse(**result)

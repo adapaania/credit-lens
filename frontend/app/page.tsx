@@ -48,6 +48,47 @@ export default function Home() {
     return created;
   }, []);
 
+  async function handleDraftMemo() {
+    if (isLoading) {
+      return;
+    }
+
+    setError(null);
+    setMessages((current) => [
+      ...current,
+      { role: "user", content: `Draft memo section for ${filings.find((f) => f.id === selectedFiling)?.label ?? selectedFiling}` },
+    ]);
+    setIsLoading(true);
+
+    try {
+      const response = await fetch("/api/memo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filing_id: selectedFiling }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      setMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content: data.narrative,
+          citations: data.citations ?? [],
+        },
+      ]);
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error ? requestError.message : "Something went wrong";
+      setError(message);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const message = input.trim();
@@ -103,20 +144,30 @@ export default function Home() {
               Cited SEC filing Q&A for commercial credit analysis.
             </p>
           </div>
-          <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
-            Filing
-            <select
-              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-slate-950 shadow-sm"
-              value={selectedFiling}
-              onChange={(event) => setSelectedFiling(event.target.value)}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:gap-4">
+            <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
+              Filing
+              <select
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-slate-950 shadow-sm"
+                value={selectedFiling}
+                onChange={(event) => setSelectedFiling(event.target.value)}
+              >
+                {filings.map((filing) => (
+                  <option key={filing.id} value={filing.id}>
+                    {filing.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="h-10 rounded-md border border-slate-300 bg-white px-4 text-sm font-medium text-slate-950 shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={isLoading}
+              onClick={handleDraftMemo}
             >
-              {filings.map((filing) => (
-                <option key={filing.id} value={filing.id}>
-                  {filing.label}
-                </option>
-              ))}
-            </select>
-          </label>
+              Draft memo section
+            </button>
+          </div>
         </header>
 
         <section className="flex flex-1 flex-col rounded-lg border border-slate-200 bg-white shadow-sm">

@@ -2,14 +2,14 @@
 
 CreditLens is an agentic RAG application for commercial credit analysts. Users select SEC filings, ask credit questions, and receive source-cited answers with financial figures grounded in the filing. The finished version will also draft a credit memo section and include an evaluation harness that checks numeric accuracy.
 
-This repository has a deployed Phase 0 walking skeleton (FastAPI backend on Railway, Next.js frontend on Vercel), Phase 1 SEC filing ingestion into Qdrant with naive dense-retrieval RAG, and Phase 2: a LangGraph agent with thread memory that chooses between filing retrieval and Tavily web search. Every financial figure in an answer is tied to a page and section citation.
+This repository has a deployed Phase 0 walking skeleton (FastAPI backend on Railway, Next.js frontend on Vercel), Phase 1 SEC filing ingestion into Qdrant with naive dense-retrieval RAG, Phase 2's LangGraph agent with thread memory that chooses between filing retrieval and Tavily web search, and Phase 3's `/memo` endpoint that drafts a cited Financial Summary & Risk Factors section. Every financial figure anywhere in the app is tied to a page and section citation.
 
 ## Build Status
 
 - **Phase 0 - Walking Skeleton**: complete and deployed.
 - **Phase 1 - SEC Ingestion and Naive RAG**: complete.
 - **Phase 2 - Agent, Memory, Tavily**: complete. `/chat` runs a LangGraph agent with a `MemorySaver` checkpointer, choosing between `retrieve_filing` and `tavily_search`.
-- **Phase 3 - Memo Section**: not started.
+- **Phase 3 - Memo Section**: complete. `/memo` extracts six key figures with citations, computes ratios, and drafts a cited narrative.
 - **Phase 4 - Evals and Hybrid Retrieval**: not started.
 
 ## Repository Structure
@@ -19,8 +19,9 @@ creditlens/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py                # FastAPI app and CORS setup
-│   │   ├── api.py                 # /health and /chat routes
+│   │   ├── api.py                 # /health, /chat, /memo routes
 │   │   ├── config.py              # environment variables
+│   │   ├── memo.py                # figure extraction, ratios, memo narrative
 │   │   ├── agent/
 │   │   │   ├── graph.py           # LangGraph agent: state, nodes, MemorySaver
 │   │   │   ├── tools.py           # retrieve_filing, tavily_search
@@ -37,10 +38,11 @@ creditlens/
 │   └── railway.toml               # Railway deployment config
 ├── frontend/
 │   ├── app/
-│   │   ├── page.tsx               # Chat UI
+│   │   ├── page.tsx               # Chat UI + Draft memo section button
 │   │   ├── layout.tsx
 │   │   ├── globals.css
-│   │   └── api/chat/route.ts      # Frontend proxy to backend
+│   │   ├── api/chat/route.ts      # Frontend proxy to backend /chat
+│   │   └── api/memo/route.ts      # Frontend proxy to backend /memo
 │   ├── package.json
 │   └── tailwind.config.ts
 ├── data/
@@ -105,6 +107,36 @@ Routing and citation rules live in `backend/app/agent/prompts.py`: filing figure
 **Citation extraction**: the graph's chat-completion loop doesn't hand back structured citations on its own — only conversational text. `run_agent()` recovers them by matching page numbers actually mentioned in the final answer against every `retrieve_filing` tool result seen anywhere in the thread so far (keyed by `filing_id` + page). This was a deliberate fix: an earlier version only looked at the current turn's tool calls, which produced an empty `citations` array whenever the model answered a follow-up from conversation memory instead of calling `retrieve_filing` again — even though the answer text still said "(page 36, ...)". Matching against mentioned page numbers works whether or not a fresh tool call happened this turn.
 
 **Known limitation — in-memory checkpointer**: `MemorySaver` is explicitly the "v1" choice per the build spec, and it means what it says: conversation history lives in the running process's memory only. It does not survive a server restart or work across multiple backend instances. Fine for this project's scope; a persistent checkpointer (e.g. backed by Postgres/Redis) would be the production upgrade.
+
+## Memo Section (Phase 3)
+
+`POST /memo` (`{"filing_id": "boeing-2024-10k"}`) drafts a credit memo section. Pipeline in `backend/app/memo.py`:
+
+1. **Targeted retrieval per figure** — six separate `retrieve()` calls, one per key figure (revenue, net income, total debt, cash, current assets, current liabilities), each with its own tailored query. This is deliberate: a single generic query risks the same wrong-line-item problem noted in the ambiguous-query limitation above (e.g. pulling a segment's revenue instead of the consolidated total). Results are merged and deduplicated into one context.
+2. **Structured extraction** — `ChatOpenAI(...).with_structured_output(FinancialFigures, method="function_calling")` extracts all six figures in one call, each as `{value, page, section}`. A figure not clearly stated in the excerpts comes back with all three fields `null` — enforced by the schema itself, not just a prompt instruction. Verified with a synthetic test (a fabricated field name with no matching context correctly returned null) and against real filings (every figure cross-checked by hand against the source PDF text for Boeing — see below).
+3. **Ratios** — computed only when both required figures are non-null and the denominator isn't zero: current ratio, net margin, cash-to-debt, debt-to-revenue. Missing inputs produce `null`, not a guess.
+4. **Risk factor retrieval** — one more `retrieve()` call for credit-relevant risk excerpts.
+5. **Narrative generation** — a final OpenRouter call writes the "Financial Summary & Risk Factors" prose. It's given the already-extracted figures pre-formatted as either `"$X million (page N, section)"` or the literal string `"not disclosed in reviewed filings"` for nulls, and instructed not to restate or recompute anything differently than given.
+
+Response shape:
+
+```json
+{
+  "company": "Boeing",
+  "fiscal_year": 2024,
+  "figures": {
+    "revenue": {"value": 66517, "page": 36, "section": "Revenues"},
+    "cash": {"value": 13801, "page": 75, "section": "Assets"}
+  },
+  "ratios": {"current_ratio": 1.32, "net_margin": -0.178, "cash_to_debt": 0.26, "debt_to_revenue": 0.81},
+  "narrative": "Financial Summary & Risk Factors\n\n...",
+  "citations": [{"page": 36, "section": "Revenues", "snippet": "..."}]
+}
+```
+
+**Figure accuracy, verified by hand**: for Boeing, every extracted figure was cross-checked against the actual balance sheet/income statement text. Total debt ($53,864M) exactly equals short-term debt ($1,278M) plus long-term debt ($52,586M) as stated on the same page. Current assets ($127,998M) and current liabilities ($97,078M) look unusually large at first glance — but that's genuinely correct for Boeing specifically: program-accounting inventory ($87,550M) and advance billings ($60,333M) are unusually large current-statement line items for an aircraft manufacturer, not an extraction bug pulling in total-balance-sheet figures instead of current ones.
+
+The frontend's "Draft memo section" button (next to the filing selector) posts to `frontend/app/api/memo/route.ts` and appends the narrative as an assistant message in the existing chat thread, reusing the same citation-rendering UI as `/chat` — no new frontend components needed.
 
 ## Known Limitations
 
@@ -223,6 +255,5 @@ Boeing gives the strongest story because credit risk connects directly to safety
 
 ## Next Build Phases
 
-1. **Phase 3**: `/memo` endpoint — extract key figures into a Pydantic model, compute ratios, generate a cited Financial Summary & Risk Factors section.
-2. **Phase 4**: golden question set, numeric exact-match eval with tolerance, Ragas metrics, hybrid retrieval (dense + BM25 + rerank), naive-vs-hybrid comparison table.
-3. **Phase 5**: submission polish — architecture diagrams, eval tables in README, phone browser test.
+1. **Phase 4**: golden question set, numeric exact-match eval with tolerance, Ragas metrics, hybrid retrieval (dense + BM25 + rerank), naive-vs-hybrid comparison table.
+2. **Phase 5**: submission polish — architecture diagrams, eval tables in README, phone browser test.
