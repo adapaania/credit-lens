@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     langchain_project: str = "creditlens"
     cohere_api_key: str | None = None
 
+    qdrant_collection: str = "creditlens_filings"
+    embedding_model: str = "embed-english-v3.0"
+    embedding_dim: int = 1024
+    dense_top_k: int = 8
+
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    chat_model: str = "openai/gpt-4.1-mini"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @property

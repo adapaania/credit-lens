@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
 from typing import List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.qa import answer_question
 
 
 router = APIRouter()
@@ -45,9 +46,8 @@ def health() -> HealthResponse:
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
-    filing_context = f" for filing `{request.filing_id}`" if request.filing_id else ""
-    thread_context = f" on thread `{request.thread_id}`" if request.thread_id else ""
-    return ChatResponse(
-        answer=f"Echo{filing_context}{thread_context}: {request.message}",
-        citations=[],
-    )
+    if not request.filing_id:
+        raise HTTPException(status_code=400, detail="filing_id is required")
+
+    result = answer_question(request.message, filing_id=request.filing_id)
+    return ChatResponse(answer=result["answer"], citations=result["citations"])

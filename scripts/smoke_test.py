@@ -35,13 +35,16 @@ def main() -> int:
     chat = post_json(
         f"{base_url}/chat",
         {
-            "message": "What is CreditLens?",
+            "message": "What was total revenue?",
             "filing_id": "boeing-2024-10k",
             "thread_id": "smoke-test",
         },
     )
-    if "Echo" not in chat.get("answer", ""):
+    if not chat.get("answer"):
         print(f"Chat check failed: {chat}")
+        return 1
+    if not isinstance(chat.get("citations"), list):
+        print(f"Chat check failed, citations missing or malformed: {chat}")
         return 1
 
     print("Smoke test passed.")
