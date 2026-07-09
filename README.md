@@ -2,13 +2,13 @@
 
 CreditLens is an agentic RAG application for commercial credit analysts. Users select SEC filings, ask credit questions, and receive source-cited answers with financial figures grounded in the filing. The finished version will also draft a credit memo section and include an evaluation harness that checks numeric accuracy.
 
-This repository has a deployed Phase 0 walking skeleton (FastAPI backend on Railway, Next.js frontend on Vercel) and a working Phase 1: SEC filing ingestion into Qdrant plus naive dense-retrieval RAG, with every financial figure in an answer tied to a page and section citation.
+This repository has a deployed Phase 0 walking skeleton (FastAPI backend on Railway, Next.js frontend on Vercel), Phase 1 SEC filing ingestion into Qdrant with naive dense-retrieval RAG, and Phase 2: a LangGraph agent with thread memory that chooses between filing retrieval and Tavily web search. Every financial figure in an answer is tied to a page and section citation.
 
 ## Build Status
 
 - **Phase 0 - Walking Skeleton**: complete and deployed.
-- **Phase 1 - SEC Ingestion and Naive RAG**: complete. `/chat` retrieves from Qdrant and answers via OpenRouter with citations.
-- **Phase 2 - Agent, Memory, Tavily**: not started.
+- **Phase 1 - SEC Ingestion and Naive RAG**: complete.
+- **Phase 2 - Agent, Memory, Tavily**: complete. `/chat` runs a LangGraph agent with a `MemorySaver` checkpointer, choosing between `retrieve_filing` and `tavily_search`.
 - **Phase 3 - Memo Section**: not started.
 - **Phase 4 - Evals and Hybrid Retrieval**: not started.
 
@@ -21,8 +21,9 @@ creditlens/
 │   │   ├── main.py                # FastAPI app and CORS setup
 │   │   ├── api.py                 # /health and /chat routes
 │   │   ├── config.py              # environment variables
-│   │   ├── qa.py                  # retrieve -> OpenRouter answer flow
 │   │   ├── agent/
+│   │   │   ├── graph.py           # LangGraph agent: state, nodes, MemorySaver
+│   │   │   ├── tools.py           # retrieve_filing, tavily_search
 │   │   │   └── prompts.py         # centralized prompt text
 │   │   ├── ingestion/
 │   │   │   ├── parse.py           # pymupdf4llm PDF -> per-page markdown
@@ -84,17 +85,34 @@ python ../scripts/ingest.py --filing-id boeing-2024-10k   # just one
 
 Requires `OPENROUTER_API_KEY` is not needed for ingestion itself, but `QDRANT_URL`, `QDRANT_API_KEY`, and `COHERE_API_KEY` in `backend/.env` are.
 
-## Retrieval and Answering
+## Retrieval
 
 `backend/app/retrieval/dense.py` embeds the question (Cohere, `input_type="search_query"`) and does a top-8 similarity search in Qdrant filtered by `filing_id`. This is the "naive dense retrieval" baseline Phase 4 will compare against hybrid retrieval.
 
-`backend/app/qa.py` takes those chunks, builds a prompt (`backend/app/agent/prompts.py`) that requires every financial figure to carry a `(page N, section)` citation and forbids estimating uncited figures, and calls OpenRouter (`openai/gpt-4.1-mini`) for the answer. This is a plain function, not a LangGraph agent yet — that, along with Tavily tool choice and thread memory, is Phase 2.
+## Agent (Phase 2)
 
-## Known Limitation: Citation Precision
+`backend/app/agent/graph.py` builds a LangGraph `StateGraph`: an `agent` node (OpenRouter `openai/gpt-4.1-mini` via `langchain-openai`'s `ChatOpenAI`, pointed at OpenRouter's base URL) bound to two tools, and a `tools` node that executes them. A `MemorySaver` checkpointer persists conversation history per `thread_id`.
 
-Manual testing surfaced a real but subtle failure mode: the model sometimes states a figure that is genuinely present in the retrieved context, but cites a page that shows a *related, similarly-labeled* figure rather than the one actually stated. For example, asking for Boeing's net loss returned `$11,829M` (the correct consolidated "Net loss" line) but cited a page that visibly shows `$11,817M` ("Net loss attributable to Boeing shareholders" — a real, differently-labeled figure $12M lower due to noncontrolling interest). The number itself was not invented; the page attribution was imprecise.
+Two tools (`backend/app/agent/tools.py`):
 
-This is expected of single-pass LLM citation over naive retrieval, not a bug to silently patch — it's exactly what Phase 4's numeric exact-match eval harness is designed to catch and quantify systematically, and part of the motivation for the memo feature (Phase 3) extracting figures into a structured, more constrained format.
+- `retrieve_filing(query, filing_id)` — wraps naive dense retrieval. Any company-specific financial figure must come from here.
+- `tavily_search(query)` — web search for market/industry/general context. Never used for filing-specific figures.
+
+Routing and citation rules live in `backend/app/agent/prompts.py`: filing figures need a `(page N, section)` citation, Tavily results are described as external context and never presented as filing data, and conflicting sources get an explicit source-boundary explanation.
+
+**`thread_id` vs `filing_id`**: the frontend generates one `thread_id` per browser session (`localStorage`) but `filing_id` comes from the dropdown and can change on any message. Since a conversation can span multiple filings, `filing_id` isn't baked into a one-time system prompt — it travels inline with every message as `[Selected filing_id: ...]`, while the system prompt (routing/citation rules) is added once per thread.
+
+**Citation extraction**: the graph's chat-completion loop doesn't hand back structured citations on its own — only conversational text. `run_agent()` recovers them by matching page numbers actually mentioned in the final answer against every `retrieve_filing` tool result seen anywhere in the thread so far (keyed by `filing_id` + page). This was a deliberate fix: an earlier version only looked at the current turn's tool calls, which produced an empty `citations` array whenever the model answered a follow-up from conversation memory instead of calling `retrieve_filing` again — even though the answer text still said "(page 36, ...)". Matching against mentioned page numbers works whether or not a fresh tool call happened this turn.
+
+**Known limitation — in-memory checkpointer**: `MemorySaver` is explicitly the "v1" choice per the build spec, and it means what it says: conversation history lives in the running process's memory only. It does not survive a server restart or work across multiple backend instances. Fine for this project's scope; a persistent checkpointer (e.g. backed by Postgres/Redis) would be the production upgrade.
+
+## Known Limitations
+
+**Citation precision.** Manual testing surfaced a real but subtle failure mode: the model sometimes states a figure that is genuinely present in the retrieved context, but cites a page that shows a *related, similarly-labeled* figure rather than the one actually stated. For example, asking for Boeing's net loss returned `$11,829M` (the correct consolidated "Net loss" line) but cited a page that visibly shows `$11,817M` ("Net loss attributable to Boeing shareholders" — a real, differently-labeled figure $12M lower due to noncontrolling interest). The number itself was not invented; the page attribution was imprecise.
+
+**Ambiguous-query retrieval.** Asking "What was Boeing's total revenue?" with naive dense retrieval sometimes surfaces segment-level revenue chunks (e.g. Global Services' $19,954M) alongside the true consolidated total ($66,517M), and the model has picked the wrong one. More specific phrasing ("total consolidated revenue") retrieves correctly. Naive top-8 dense search has no way to distinguish "the segment discussion that happens to also say Revenues" from "the consolidated total" — that's a retrieval precision problem, not a generation problem.
+
+Both are expected of single-pass LLM answering over naive dense retrieval, not bugs to silently patch around with more prompt engineering — they're exactly what Phase 4's numeric exact-match eval harness and hybrid retrieval (dense + BM25 + rerank) exist to catch and fix systematically, and part of the motivation for the memo feature (Phase 3) extracting figures into a structured, more constrained format instead of free-form chat answers.
 
 ## Backend
 
@@ -102,7 +120,7 @@ The backend is a FastAPI service.
 
 `GET /health` returns service status. Deployment platforms use this to confirm the backend is alive.
 
-`POST /chat` retrieves from Qdrant for the given `filing_id` and returns a cited answer.
+`POST /chat` runs the LangGraph agent for the given `filing_id` and `thread_id`, returning a cited answer.
 
 Example request:
 
@@ -118,16 +136,16 @@ Example response shape:
 
 ```json
 {
-  "answer": "Boeing's total revenue for 2024 was $66,517 million (page 72, section: Index to the Consolidated Financial Statements)...",
+  "answer": "Boeing's total revenue for 2024 was $66,517 million (page 36, Revenues)...",
   "citations": [
-    {"page": 72, "section": "Index to the Consolidated Financial Statements", "snippet": "..."}
+    {"page": 36, "section": "Revenues", "snippet": "..."}
   ]
 }
 ```
 
 ## Frontend
 
-The frontend is a Next.js App Router application with Tailwind. Unchanged from Phase 0 — no frontend code changes were needed for Phase 1, since the response shape (`answer` + `citations`) was already anticipated.
+The frontend is a Next.js App Router application with Tailwind. Unchanged since Phase 0 — no frontend code changes were needed for Phase 1 or Phase 2, since the response shape (`answer` + `citations`) and the persistent `thread_id` were already anticipated in the original skeleton.
 
 The page includes:
 
@@ -180,7 +198,7 @@ Backend on Railway:
 
 1. Create a Railway project from this repo.
 2. Set the service root to `backend`.
-3. Add environment variables from `.env.example`, including `OPENROUTER_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`, and `COHERE_API_KEY` — `/chat` will error without these.
+3. Add environment variables from `.env.example`, including `OPENROUTER_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`, `COHERE_API_KEY`, and `TAVILY_API_KEY` — `/chat` will error without these. `LANGCHAIN_TRACING_V2`/`LANGCHAIN_API_KEY` are optional (LangSmith tracing); leave `LANGCHAIN_API_KEY` blank to skip it.
 4. Set `FRONTEND_ORIGIN` to the deployed Vercel URL.
 5. Confirm `/health` is reachable.
 6. Run `python scripts/ingest.py` locally pointed at the same Qdrant Cloud instance the deployed backend uses, so its collection is populated.
@@ -205,7 +223,6 @@ Boeing gives the strongest story because credit risk connects directly to safety
 
 ## Next Build Phases
 
-1. **Phase 2**: LangGraph agent with `MemorySaver` checkpointer, `retrieve_filing` and `tavily_search` tools, thread-based memory using the frontend's `thread_id`.
-2. **Phase 3**: `/memo` endpoint — extract key figures into a Pydantic model, compute ratios, generate a cited Financial Summary & Risk Factors section.
-3. **Phase 4**: golden question set, numeric exact-match eval with tolerance, Ragas metrics, hybrid retrieval (dense + BM25 + rerank), naive-vs-hybrid comparison table.
-4. **Phase 5**: submission polish — architecture diagrams, eval tables in README, phone browser test.
+1. **Phase 3**: `/memo` endpoint — extract key figures into a Pydantic model, compute ratios, generate a cited Financial Summary & Risk Factors section.
+2. **Phase 4**: golden question set, numeric exact-match eval with tolerance, Ragas metrics, hybrid retrieval (dense + BM25 + rerank), naive-vs-hybrid comparison table.
+3. **Phase 5**: submission polish — architecture diagrams, eval tables in README, phone browser test.

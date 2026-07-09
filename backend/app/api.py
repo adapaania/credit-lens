@@ -4,8 +4,8 @@ from typing import List
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.agent.graph import run_agent
 from app.config import get_settings
-from app.qa import answer_question
 
 
 router = APIRouter()
@@ -48,6 +48,8 @@ def health() -> HealthResponse:
 def chat(request: ChatRequest) -> ChatResponse:
     if not request.filing_id:
         raise HTTPException(status_code=400, detail="filing_id is required")
+    if not request.thread_id:
+        raise HTTPException(status_code=400, detail="thread_id is required")
 
-    result = answer_question(request.message, filing_id=request.filing_id)
+    result = run_agent(request.message, filing_id=request.filing_id, thread_id=request.thread_id)
     return ChatResponse(answer=result["answer"], citations=result["citations"])
