@@ -2,7 +2,7 @@
 
 CreditLens is an agentic RAG application for commercial credit analysts. Users select SEC filings, ask credit questions, and receive source-cited answers with financial figures grounded in the filing. The finished version will also draft a credit memo section and include an evaluation harness that checks numeric accuracy.
 
-This repository has a deployed Phase 0 walking skeleton (FastAPI backend on Railway, Next.js frontend on Vercel), Phase 1 SEC filing ingestion into Qdrant with naive dense-retrieval RAG, Phase 2's LangGraph agent with thread memory that chooses between filing retrieval and Tavily web search, and Phase 3's `/memo` endpoint that drafts a cited Financial Summary & Risk Factors section. Every financial figure anywhere in the app is tied to a page and section citation.
+This repository has a deployed Phase 0 walking skeleton (FastAPI backend on Railway, Next.js frontend on Vercel), Phase 1 SEC filing ingestion into Qdrant with naive dense-retrieval RAG, Phase 2's LangGraph agent with thread memory that chooses between filing retrieval and Tavily web search, Phase 3's `/memo` endpoint that drafts a cited Financial Summary & Risk Factors section, and Phase 4's eval harness (numeric exact-match + Ragas) comparing naive dense retrieval against a hybrid dense+BM25+rerank pipeline. Every financial figure anywhere in the app is tied to a page and section citation.
 
 ## Build Status
 
@@ -10,7 +10,7 @@ This repository has a deployed Phase 0 walking skeleton (FastAPI backend on Rail
 - **Phase 1 - SEC Ingestion and Naive RAG**: complete.
 - **Phase 2 - Agent, Memory, Tavily**: complete. `/chat` runs a LangGraph agent with a `MemorySaver` checkpointer, choosing between `retrieve_filing` and `tavily_search`.
 - **Phase 3 - Memo Section**: complete. `/memo` extracts six key figures with citations, computes ratios, and drafts a cited narrative.
-- **Phase 4 - Evals and Hybrid Retrieval**: not started.
+- **Phase 4 - Evals and Hybrid Retrieval**: complete. Golden question set, numeric exact-match eval, Ragas metrics, hybrid retrieval, real comparison table below.
 
 ## Repository Structure
 
@@ -32,7 +32,8 @@ creditlens/
 │   │   │   ├── embeddings.py      # Cohere embeddings (isolated, swappable)
 │   │   │   └── index.py           # Qdrant collection + upsert
 │   │   └── retrieval/
-│   │       └── dense.py           # naive dense retrieval, top-k 8
+│   │       ├── dense.py           # naive dense retrieval, top-k 8
+│   │       └── hybrid.py          # dense + BM25, RRF fusion, Cohere rerank to top-6
 │   ├── requirements.txt
 │   ├── Procfile                   # Railway process command
 │   └── railway.toml               # Railway deployment config
@@ -47,8 +48,15 @@ creditlens/
 │   └── tailwind.config.ts
 ├── data/
 │   ├── filings/                   # Boeing, Lockheed, RTX FY2024 10-K PDFs
-│   └── golden/                    # Evaluation questions will go here (Phase 4)
-├── evals/results/                 # Saved eval outputs will go here (Phase 4)
+│   └── golden/
+│       ├── questions.jsonl        # 22 golden questions (18 numeric, 4 qualitative)
+│       └── numeric_truth.jsonl    # hand-verified figures, cross-checked against source text
+├── evals/
+│   ├── pipeline.py                # shared retrieve -> answer flow (not the agent)
+│   ├── numeric_eval.py            # unit/scale normalization, 0.5% tolerance matching
+│   ├── cohere_langchain_embeddings.py  # LangChain Embeddings shim around our Cohere client
+│   ├── run_evals.py               # orchestrator: python evals/run_evals.py --pipeline naive|hybrid
+│   └── results/                   # naive_results.{json,md}, hybrid_results.{json,md}
 ├── scripts/
 │   ├── ingest.py                  # parse -> chunk -> index each filing
 │   └── smoke_test.py              # Checks /health and /chat
@@ -89,7 +97,11 @@ Requires `OPENROUTER_API_KEY` is not needed for ingestion itself, but `QDRANT_UR
 
 ## Retrieval
 
-`backend/app/retrieval/dense.py` embeds the question (Cohere, `input_type="search_query"`) and does a top-8 similarity search in Qdrant filtered by `filing_id`. This is the "naive dense retrieval" baseline Phase 4 will compare against hybrid retrieval.
+`backend/app/retrieval/dense.py` embeds the question (Cohere, `input_type="search_query"`) and does a top-8 similarity search in Qdrant filtered by `filing_id`. This is the "naive dense retrieval" baseline.
+
+`backend/app/retrieval/hybrid.py` is the Phase 4 alternative: dense top-20 plus a BM25 top-20 (built on demand per `filing_id` from a Qdrant `scroll` over that filing's chunks, cached in-process — the largest corpus here is under 500 chunks, small enough for an unpaginated in-memory BM25 index), fused with reciprocal rank fusion (k=60), then reranked from the fused top-20 down to a final top-6 with Cohere Rerank (`rerank-v3.5`).
+
+`/chat` and `/memo` still use naive dense retrieval in production — Phase 4's job was to build and measure the hybrid alternative, not silently swap production over. See the eval results below before deciding whether to switch.
 
 ## Agent (Phase 2)
 
@@ -137,6 +149,56 @@ Response shape:
 **Figure accuracy, verified by hand**: for Boeing, every extracted figure was cross-checked against the actual balance sheet/income statement text. Total debt ($53,864M) exactly equals short-term debt ($1,278M) plus long-term debt ($52,586M) as stated on the same page. Current assets ($127,998M) and current liabilities ($97,078M) look unusually large at first glance — but that's genuinely correct for Boeing specifically: program-accounting inventory ($87,550M) and advance billings ($60,333M) are unusually large current-statement line items for an aircraft manufacturer, not an extraction bug pulling in total-balance-sheet figures instead of current ones.
 
 The frontend's "Draft memo section" button (next to the filing selector) posts to `frontend/app/api/memo/route.ts` and appends the narrative as an assistant message in the existing chat thread, reusing the same citation-rendering UI as `/chat` — no new frontend components needed.
+
+## Evaluation Harness (Phase 4)
+
+### Golden dataset
+
+`data/golden/questions.jsonl` has 22 questions across all three filings: 18 numeric (6 key figures × 3 companies) and 4 qualitative (risk-factor style). `data/golden/numeric_truth.jsonl` holds the ground truth for the numeric ones.
+
+Every numeric truth value was hand cross-checked against the actual filing text, not just trusted from a pipeline's own output — this caught a real bug along the way: RTX's Phase 3 memo extraction had returned $41,146M for "total debt," but the filing's own explicit "Total debt" line (in its Liquidity and Financial Condition discussion) states $41,261M — the extracted figure was actually "Total principal long-term debt" from a debt-maturity note, a different, similarly-labeled line item. The golden truth uses the correct $41,261M; the eval results below reflect that, not a value that would make either pipeline look artificially better.
+
+### Numeric eval (`evals/numeric_eval.py`)
+
+Extracts every number from the model's answer text (handling `$`, commas, parenthesized negatives, and "million"/"billion"/"thousand" scale words, normalized to millions), and checks whether any of them matches the truth value within 0.5% relative tolerance. Matching is on magnitude, not signed value — real answers commonly phrase a loss as `"a net loss of $11,817 million"` (positive number, contextual wording) rather than `"-$11,817 million"` or `"($11,817)"`, and penalizing that would be testing prose style, not numeric accuracy.
+
+### Ragas metrics
+
+Faithfulness, answer relevancy, and context precision, computed via the classic `ragas.evaluate()` API (the newer `ragas.metrics.collections` API needs an `instructor`-wrapped async client and looked less mature at this ragas version; classic is deprecated for v1.0 but fully functional today). The LLM judge is `ChatOpenAI` pointed at OpenRouter — same as the rest of the app — wrapped in `LangchainLLMWrapper`; embeddings are our existing Cohere client wrapped in a two-method `Embeddings` shim (`evals/cohere_langchain_embeddings.py`) so Ragas didn't need a second embedding provider.
+
+Getting `ragas` installed required one real fix: it pulled in `langchain-community` 0.4.2, whose `chat_models.vertexai` submodule `ragas`'s LLM base module imports unconditionally at the top of the file — but that submodule was removed from `langchain-community` in the 0.4 line. Pinning `langchain-community==0.3.31` (last release with it still in-tree) resolved it without touching any of this project's own pinned `langchain-core`/`langchain-openai`/`langgraph` versions.
+
+### Comparison: naive dense vs hybrid
+
+Both pipelines answer the same 22 questions through the same prompt and model (`evals/pipeline.py` — a plain retrieve-then-answer function, deliberately not the LangGraph agent, so Tavily/tool-choice behavior can't confound a retrieval-method comparison), differing only in which retriever supplies the context.
+
+| Metric | Naive dense (top-8) | Hybrid (dense+BM25, RRF, rerank top-6) |
+|---|---|---|
+| Numeric accuracy | 33.3% (6/18) | 66.7% (12/18) |
+| Faithfulness | 0.777 | 0.708 |
+| Answer relevancy | 0.422 | 0.521 |
+| Context precision | 0.250 | 0.514 |
+
+Full per-question results: `evals/results/naive_results.md` and `evals/results/hybrid_results.md` (or the `.json` versions for the raw contexts/citations behind each answer).
+
+**Hybrid roughly doubles numeric accuracy and context precision**, and improves answer relevancy — reranking directly optimizes for putting the actually-relevant chunk near the top, which is exactly what numeric precision and context precision both reward. Run to run:
+
+- **Every current-assets and current-liabilities question failed in both pipelines**, for all three companies. Phase 3's `/memo` endpoint successfully extracts these same figures — but it uses short, targeted retrieval queries per figure (e.g. `"total current assets"`), while this eval embeds the full natural-language question (`"What were Boeing's total current assets at the end of fiscal year 2024?"`) as the query. That gap is itself a real, useful finding about query-formulation sensitivity in both naive and hybrid dense retrieval — not a bug in either pipeline, and not something this phase's scope asked to fix.
+- **Faithfulness dropped slightly under hybrid** (0.708 vs 0.777). With a sample size of 22 this could be noise, or it could mean that once hybrid supplies more genuinely relevant context, the model attempts more specific claims that are occasionally less tightly grounded than the vaguer, safer answers naive retrieval's weaker context tends to produce. Not confirmed either way at this sample size.
+- **The 0.5% tolerance can pass a technically-wrong figure that happens to be numerically close.** Hybrid's RTX total-debt answer stated $41,146M (the same wrong "long-term debt" line item flagged above) — not the correct $41,261M — but the two are within 0.28% of each other, so it passes. This is a known, accepted property of tolerance-based numeric matching, not a scoring bug; a hard exact-match would have a near-zero false-pass rate but would also fail on legitimate rounding differences.
+
+### Running it yourself
+
+```bash
+cd backend && source .venv/bin/activate
+pip install -r ../evals/requirements.txt   # ragas + a langchain-community pin; not part of the deployed app
+python ../evals/run_evals.py --pipeline naive
+python ../evals/run_evals.py --pipeline hybrid
+```
+
+Requires `OPENROUTER_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`, and `COHERE_API_KEY` (same as the rest of the app) in `backend/.env`. Each run takes a few minutes — 22 questions × (retrieval + answer generation) plus Ragas's own multi-step LLM evaluation per question.
+
+`ragas` and its `langchain-community` pin live in `evals/requirements.txt`, separate from `backend/requirements.txt` — Railway never needs them, only local eval runs do. `rank-bm25` (used by `hybrid.py` itself) is a real backend dependency and stays in `backend/requirements.txt`.
 
 ## Known Limitations
 
@@ -255,5 +317,4 @@ Boeing gives the strongest story because credit risk connects directly to safety
 
 ## Next Build Phases
 
-1. **Phase 4**: golden question set, numeric exact-match eval with tolerance, Ragas metrics, hybrid retrieval (dense + BM25 + rerank), naive-vs-hybrid comparison table.
-2. **Phase 5**: submission polish — architecture diagrams, eval tables in README, phone browser test.
+1. **Phase 5**: submission polish — architecture diagrams, confirm no secrets committed, deployed smoke test, phone browser test.

@@ -1,0 +1,9 @@
+# Eval-harness-only dependencies, on top of backend/requirements.txt.
+# Not needed by the deployed app (Railway) - only for running evals/run_evals.py locally.
+ragas==0.4.3
+# ragas 0.4.3 pulls in langchain-community, whose default (0.4.x) version
+# unconditionally imports a langchain_community.chat_models.vertexai submodule
+# that no longer exists in that release line. Pinning the last 0.3.x release
+# (which still has it in-tree) fixes the import without touching this
+# project's own pinned langchain-core/langchain-openai/langgraph versions.
+langchain-community==0.3.31

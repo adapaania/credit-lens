@@ -25,6 +25,8 @@ class Settings(BaseSettings):
 
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     chat_model: str = "openai/gpt-4.1-mini"
+    rerank_model: str = "rerank-v3.5"
+    hybrid_top_k: int = 6
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

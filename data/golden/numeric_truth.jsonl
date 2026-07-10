@@ -1,0 +1,18 @@
+{"truth_id": "boeing_revenue_2024", "company": "Boeing", "filing_id": "boeing-2024-10k", "figure": "revenue", "value_millions": 66517, "page": 36, "section": "Revenues"}
+{"truth_id": "boeing_net_income_2024", "company": "Boeing", "filing_id": "boeing-2024-10k", "figure": "net_income", "value_millions": -11817, "page": 36, "section": "GAAP"}
+{"truth_id": "boeing_total_debt_2024", "company": "Boeing", "filing_id": "boeing-2024-10k", "figure": "total_debt", "value_millions": 53864, "page": 127, "section": "Other debt and notes"}
+{"truth_id": "boeing_cash_2024", "company": "Boeing", "filing_id": "boeing-2024-10k", "figure": "cash", "value_millions": 13801, "page": 75, "section": "Assets"}
+{"truth_id": "boeing_current_assets_2024", "company": "Boeing", "filing_id": "boeing-2024-10k", "figure": "current_assets", "value_millions": 127998, "page": 75, "section": "Assets"}
+{"truth_id": "boeing_current_liabilities_2024", "company": "Boeing", "filing_id": "boeing-2024-10k", "figure": "current_liabilities", "value_millions": 97078, "page": 75, "section": "Liabilities and equity"}
+{"truth_id": "lockheed_revenue_2024", "company": "Lockheed Martin", "filing_id": "lockheed-2024-10k", "figure": "revenue", "value_millions": 71043, "page": 59, "section": "Net Sales"}
+{"truth_id": "lockheed_net_income_2024", "company": "Lockheed Martin", "filing_id": "lockheed-2024-10k", "figure": "net_income", "value_millions": 5336, "page": 59, "section": "Net Sales"}
+{"truth_id": "lockheed_total_debt_2024", "company": "Lockheed Martin", "filing_id": "lockheed-2024-10k", "figure": "total_debt", "value_millions": 20270, "page": 134, "section": "Note 16 - Debt"}
+{"truth_id": "lockheed_cash_2024", "company": "Lockheed Martin", "filing_id": "lockheed-2024-10k", "figure": "cash", "value_millions": 2483, "page": 97, "section": "December 31,"}
+{"truth_id": "lockheed_current_assets_2024", "company": "Lockheed Martin", "filing_id": "lockheed-2024-10k", "figure": "current_assets", "value_millions": 21849, "page": 97, "section": "December 31,"}
+{"truth_id": "lockheed_current_liabilities_2024", "company": "Lockheed Martin", "filing_id": "lockheed-2024-10k", "figure": "current_liabilities", "value_millions": 19420, "page": 97, "section": "December 31,"}
+{"truth_id": "rtx_revenue_2024", "company": "RTX", "filing_id": "rtx-2024-10k", "figure": "revenue", "value_millions": 80738, "page": 73, "section": "Total Net Sales"}
+{"truth_id": "rtx_net_income_2024", "company": "RTX", "filing_id": "rtx-2024-10k", "figure": "net_income", "value_millions": 4774, "page": 148, "section": "Note 4: Earnings Per Share"}
+{"truth_id": "rtx_total_debt_2024", "company": "RTX", "filing_id": "rtx-2024-10k", "figure": "total_debt", "value_millions": 41261, "page": 96, "section": "Liquidity and Financial Condition"}
+{"truth_id": "rtx_cash_2024", "company": "RTX", "filing_id": "rtx-2024-10k", "figure": "cash", "value_millions": 5578, "page": 123, "section": "Consolidated Balance Sheet"}
+{"truth_id": "rtx_current_assets_2024", "company": "RTX", "filing_id": "rtx-2024-10k", "figure": "current_assets", "value_millions": 51133, "page": 123, "section": "Consolidated Balance Sheet"}
+{"truth_id": "rtx_current_liabilities_2024", "company": "RTX", "filing_id": "rtx-2024-10k", "figure": "current_liabilities", "value_millions": 51499, "page": 123, "section": "Consolidated Balance Sheet"}
