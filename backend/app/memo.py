@@ -15,7 +15,8 @@ from pydantic import BaseModel, Field
 
 from app.agent.prompts import MEMO_EXTRACTION_PROMPT, MEMO_NARRATIVE_PROMPT
 from app.config import get_settings
-from app.retrieval.dense import RetrievedChunk, retrieve
+from app.retrieval.dense import RetrievedChunk
+from app.retrieval.hybrid import retrieve
 
 FIGURE_QUERIES = {
     "revenue": "total revenue total revenues consolidated",

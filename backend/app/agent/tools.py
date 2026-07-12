@@ -6,7 +6,8 @@ from langchain_core.tools import tool
 from tavily import TavilyClient
 
 from app.config import get_settings
-from app.retrieval.dense import retrieve
+from app.retrieval.hybrid import retrieve
+from app.retrieval.query_rewrite import rewrite_query
 
 _tavily_client: TavilyClient | None = None
 
@@ -30,7 +31,7 @@ def retrieve_filing(query: str, filing_id: str) -> str:
     section, and text so the answer can be cited precisely.
     """
     try:
-        chunks = retrieve(query, filing_id=filing_id)
+        chunks = retrieve(rewrite_query(query), filing_id=filing_id)
     except Exception as exc:  # noqa: BLE001 - network call at a system boundary
         return json.dumps({"error": f"Filing retrieval is temporarily unavailable: {exc}"})
 

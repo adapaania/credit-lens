@@ -21,11 +21,22 @@ sys.path.insert(0, str(EVALS_DIR))
 from app.config import get_settings  # noqa: E402
 from app.retrieval.dense import retrieve as dense_retrieve  # noqa: E402
 from app.retrieval.hybrid import retrieve as hybrid_retrieve  # noqa: E402
+from app.retrieval.query_rewrite import rewrite_query  # noqa: E402
 from cohere_langchain_embeddings import CohereLangchainEmbeddings  # noqa: E402
 from numeric_eval import numeric_match  # noqa: E402
 from pipeline import answer_with_retrieval  # noqa: E402
 
 RETRIEVE_FNS = {"naive": dense_retrieve, "hybrid": hybrid_retrieve}
+
+
+def _with_query_rewrite(retrieve_fn):
+    """Wrap a retrieve_fn so the retrieval call sees a rewritten query while
+    answer_with_retrieval still uses the original question for the answer prompt."""
+
+    def wrapped(question: str, filing_id: str):
+        return retrieve_fn(rewrite_query(question), filing_id=filing_id)
+
+    return wrapped
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "golden"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -36,8 +47,10 @@ def load_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def run_pipeline(pipeline_name: str) -> list[dict]:
+def run_pipeline(pipeline_name: str, rewrite: bool = False) -> list[dict]:
     retrieve_fn = RETRIEVE_FNS[pipeline_name]
+    if rewrite:
+        retrieve_fn = _with_query_rewrite(retrieve_fn)
     questions = load_jsonl(DATA_DIR / "questions.jsonl")
     truths = {t["truth_id"]: t for t in load_jsonl(DATA_DIR / "numeric_truth.jsonl")}
 
@@ -175,20 +188,26 @@ def write_markdown(summary: dict, path: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run CreditLens retrieval evals.")
     parser.add_argument("--pipeline", choices=["naive", "hybrid"], required=True)
+    parser.add_argument(
+        "--rewrite",
+        action="store_true",
+        help="Rewrite the question into a short keyword query before retrieval (Task 6.3 improvement).",
+    )
     args = parser.parse_args()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"Running {args.pipeline} pipeline over golden questions...")
-    per_question = run_pipeline(args.pipeline)
+    run_name = f"{args.pipeline}-rewrite" if args.rewrite else args.pipeline
+    print(f"Running {run_name} pipeline over golden questions...")
+    per_question = run_pipeline(args.pipeline, rewrite=args.rewrite)
 
     print("Scoring with Ragas (faithfulness, answer_relevancy, context_precision)...")
     ragas_scores = run_ragas(per_question)
 
-    summary = summarize(args.pipeline, per_question, ragas_scores)
+    summary = summarize(run_name, per_question, ragas_scores)
 
-    json_path = RESULTS_DIR / f"{args.pipeline}_results.json"
-    md_path = RESULTS_DIR / f"{args.pipeline}_results.md"
+    json_path = RESULTS_DIR / f"{run_name}_results.json"
+    md_path = RESULTS_DIR / f"{run_name}_results.md"
     json_path.write_text(json.dumps(summary, indent=2))
     write_markdown(summary, md_path)
 

@@ -2,7 +2,9 @@
 
 CreditLens is an agentic RAG application for commercial credit analysts. Users select SEC filings, ask credit questions, and receive source-cited answers with financial figures grounded in the filing. The finished version will also draft a credit memo section and include an evaluation harness that checks numeric accuracy.
 
-This repository has a deployed Phase 0 walking skeleton (FastAPI backend on Railway, Next.js frontend on Vercel), Phase 1 SEC filing ingestion into Qdrant with naive dense-retrieval RAG, Phase 2's LangGraph agent with thread memory that chooses between filing retrieval and Tavily web search, Phase 3's `/memo` endpoint that drafts a cited Financial Summary & Risk Factors section, and Phase 4's eval harness (numeric exact-match + Ragas) comparing naive dense retrieval against a hybrid dense+BM25+rerank pipeline. Every financial figure anywhere in the app is tied to a page and section citation.
+This repository has a deployed Phase 0 walking skeleton (FastAPI backend on Railway, Next.js frontend on Vercel), Phase 1 SEC filing ingestion into Qdrant with naive dense-retrieval RAG, Phase 2's LangGraph agent with thread memory that chooses between filing retrieval and Tavily web search, Phase 3's `/memo` endpoint that drafts a cited Financial Summary & Risk Factors section, Phase 4's eval harness (numeric exact-match + Ragas) comparing naive dense retrieval against a hybrid dense+BM25+rerank pipeline, and Phase 5's query-rewrite improvement (with production promoted onto hybrid + rewrite). Every financial figure anywhere in the app is tied to a page and section citation.
+
+For the certification-challenge write-up (problem/audience, architecture diagrams, data handling, and the full retrieval-improvement narrative), see [`CERTIFICATION_CHALLENGE.md`](CERTIFICATION_CHALLENGE.md). This document stays focused on technical/developer reference.
 
 ## Build Status
 
@@ -11,6 +13,7 @@ This repository has a deployed Phase 0 walking skeleton (FastAPI backend on Rail
 - **Phase 2 - Agent, Memory, Tavily**: complete. `/chat` runs a LangGraph agent with a `MemorySaver` checkpointer, choosing between `retrieve_filing` and `tavily_search`.
 - **Phase 3 - Memo Section**: complete. `/memo` extracts six key figures with citations, computes ratios, and drafts a cited narrative.
 - **Phase 4 - Evals and Hybrid Retrieval**: complete. Golden question set, numeric exact-match eval, Ragas metrics, hybrid retrieval, real comparison table below.
+- **Phase 5 - Submission Polish**: complete. Query-rewrite retrieval improvement (with hard eval evidence), production promoted from naive to hybrid+rewrite retrieval, architecture diagrams and full write-up in `CERTIFICATION_CHALLENGE.md`.
 
 ## Repository Structure
 
@@ -32,8 +35,9 @@ creditlens/
 │   │   │   ├── embeddings.py      # Cohere embeddings (isolated, swappable)
 │   │   │   └── index.py           # Qdrant collection + upsert
 │   │   └── retrieval/
-│   │       ├── dense.py           # naive dense retrieval, top-k 8
-│   │       └── hybrid.py          # dense + BM25, RRF fusion, Cohere rerank to top-6
+│   │       ├── dense.py           # naive dense retrieval, top-k 8 (eval baseline only)
+│   │       ├── hybrid.py          # dense + BM25, RRF fusion, Cohere rerank to top-6 (production)
+│   │       └── query_rewrite.py   # LLM query rewrite before retrieval (production)
 │   ├── requirements.txt
 │   ├── Procfile                   # Railway process command
 │   └── railway.toml               # Railway deployment config
@@ -56,7 +60,7 @@ creditlens/
 │   ├── numeric_eval.py            # unit/scale normalization, 0.5% tolerance matching
 │   ├── cohere_langchain_embeddings.py  # LangChain Embeddings shim around our Cohere client
 │   ├── run_evals.py               # orchestrator: python evals/run_evals.py --pipeline naive|hybrid
-│   └── results/                   # naive_results.{json,md}, hybrid_results.{json,md}
+│   └── results/                   # naive/hybrid/hybrid-rewrite_results.{json,md}
 ├── scripts/
 │   ├── ingest.py                  # parse -> chunk -> index each filing
 │   └── smoke_test.py              # Checks /health and /chat
@@ -97,11 +101,13 @@ Requires `OPENROUTER_API_KEY` is not needed for ingestion itself, but `QDRANT_UR
 
 ## Retrieval
 
-`backend/app/retrieval/dense.py` embeds the question (Cohere, `input_type="search_query"`) and does a top-8 similarity search in Qdrant filtered by `filing_id`. This is the "naive dense retrieval" baseline.
+`backend/app/retrieval/dense.py` embeds the question (Cohere, `input_type="search_query"`) and does a top-8 similarity search in Qdrant filtered by `filing_id`. This is the "naive dense retrieval" baseline, kept as-is for the eval comparison below and no longer used by production.
 
 `backend/app/retrieval/hybrid.py` is the Phase 4 alternative: dense top-20 plus a BM25 top-20 (built on demand per `filing_id` from a Qdrant `scroll` over that filing's chunks, cached in-process — the largest corpus here is under 500 chunks, small enough for an unpaginated in-memory BM25 index), fused with reciprocal rank fusion (k=60), then reranked from the fused top-20 down to a final top-6 with Cohere Rerank (`rerank-v3.5`).
 
-`/chat` and `/memo` still use naive dense retrieval in production — Phase 4's job was to build and measure the hybrid alternative, not silently swap production over. See the eval results below before deciding whether to switch.
+`backend/app/retrieval/query_rewrite.py` is the Phase 5 addition: a small LLM call rewrites the incoming question into a short, targeted keyword query before it reaches the retriever, falling back to the original question on any error. This exists because of a diagnosed, 100%-consistent retrieval failure — see the comparison table below — where raw natural-language questions about balance-sheet totals never surfaced the correct (indexed, retrievable) chunk in either naive or hybrid retrieval.
+
+**`/chat` and `/memo` now both use hybrid retrieval, with `/chat`'s `retrieve_filing` tool additionally applying query rewriting.** This was a real gap found and fixed in Phase 5: Phase 4 built and measured hybrid retrieval but never actually promoted it into the production code path — `tools.py` and `memo.py` were still importing `retrieval/dense.py` despite the eval evidence favoring hybrid. See `CERTIFICATION_CHALLENGE.md` (Task 6) for the full before/after diagnosis and numbers.
 
 ## Agent (Phase 2)
 
@@ -109,7 +115,7 @@ Requires `OPENROUTER_API_KEY` is not needed for ingestion itself, but `QDRANT_UR
 
 Two tools (`backend/app/agent/tools.py`):
 
-- `retrieve_filing(query, filing_id)` — wraps naive dense retrieval. Any company-specific financial figure must come from here.
+- `retrieve_filing(query, filing_id)` — rewrites the query (`retrieval/query_rewrite.py`), then runs it through hybrid retrieval. Any company-specific financial figure must come from here.
 - `tavily_search(query)` — web search for market/industry/general context. Never used for filing-specific figures.
 
 Routing and citation rules live in `backend/app/agent/prompts.py`: filing figures need a `(page N, section)` citation, Tavily results are described as external context and never presented as filing data, and conflicting sources get an explicit source-boundary explanation.
@@ -168,24 +174,25 @@ Faithfulness, answer relevancy, and context precision, computed via the classic 
 
 Getting `ragas` installed required one real fix: it pulled in `langchain-community` 0.4.2, whose `chat_models.vertexai` submodule `ragas`'s LLM base module imports unconditionally at the top of the file — but that submodule was removed from `langchain-community` in the 0.4 line. Pinning `langchain-community==0.3.31` (last release with it still in-tree) resolved it without touching any of this project's own pinned `langchain-core`/`langchain-openai`/`langgraph` versions.
 
-### Comparison: naive dense vs hybrid
+### Comparison: naive dense vs hybrid vs hybrid + query rewrite
 
-Both pipelines answer the same 22 questions through the same prompt and model (`evals/pipeline.py` — a plain retrieve-then-answer function, deliberately not the LangGraph agent, so Tavily/tool-choice behavior can't confound a retrieval-method comparison), differing only in which retriever supplies the context.
+All three runs answer the same 22 questions through the same prompt and model (`evals/pipeline.py` — a plain retrieve-then-answer function, deliberately not the LangGraph agent, so Tavily/tool-choice behavior can't confound a retrieval-method comparison), differing only in retrieval.
 
-| Metric | Naive dense (top-8) | Hybrid (dense+BM25, RRF, rerank top-6) |
-|---|---|---|
-| Numeric accuracy | 33.3% (6/18) | 66.7% (12/18) |
-| Faithfulness | 0.777 | 0.708 |
-| Answer relevancy | 0.422 | 0.521 |
-| Context precision | 0.250 | 0.514 |
+| Metric | Naive dense (top-8) | Hybrid (dense+BM25, RRF, rerank top-6) | Hybrid + query rewrite |
+|---|---|---|---|
+| Numeric accuracy | 33.3% (6/18) | 66.7% (12/18) | **83.3% (15/18)** |
+| Faithfulness | 0.777 | 0.708 | 0.576 |
+| Answer relevancy | 0.422 | 0.521 | 0.731 |
+| Context precision | 0.250 | 0.514 | 0.628 |
 
-Full per-question results: `evals/results/naive_results.md` and `evals/results/hybrid_results.md` (or the `.json` versions for the raw contexts/citations behind each answer).
+Full per-question results: `evals/results/naive_results.md`, `evals/results/hybrid_results.md`, `evals/results/hybrid-rewrite_results.md` (or the `.json` versions for the raw contexts/citations behind each answer).
 
-**Hybrid roughly doubles numeric accuracy and context precision**, and improves answer relevancy — reranking directly optimizes for putting the actually-relevant chunk near the top, which is exactly what numeric precision and context precision both reward. Run to run:
+**Hybrid roughly doubles numeric accuracy and context precision over naive**, and query rewriting adds another +16.6 points of numeric accuracy on top of that. Notable findings, including the ones that motivated query rewriting in the first place:
 
-- **Every current-assets and current-liabilities question failed in both pipelines**, for all three companies. Phase 3's `/memo` endpoint successfully extracts these same figures — but it uses short, targeted retrieval queries per figure (e.g. `"total current assets"`), while this eval embeds the full natural-language question (`"What were Boeing's total current assets at the end of fiscal year 2024?"`) as the query. That gap is itself a real, useful finding about query-formulation sensitivity in both naive and hybrid dense retrieval — not a bug in either pipeline, and not something this phase's scope asked to fix.
-- **Faithfulness dropped slightly under hybrid** (0.708 vs 0.777). With a sample size of 22 this could be noise, or it could mean that once hybrid supplies more genuinely relevant context, the model attempts more specific claims that are occasionally less tightly grounded than the vaguer, safer answers naive retrieval's weaker context tends to produce. Not confirmed either way at this sample size.
-- **The 0.5% tolerance can pass a technically-wrong figure that happens to be numerically close.** Hybrid's RTX total-debt answer stated $41,146M (the same wrong "long-term debt" line item flagged above) — not the correct $41,261M — but the two are within 0.28% of each other, so it passes. This is a known, accepted property of tolerance-based numeric matching, not a scoring bug; a hard exact-match would have a near-zero false-pass rate but would also fail on legitimate rounding differences.
+- **Every current-assets and current-liabilities question failed in both naive and hybrid**, for all three companies — a 100%-consistent pattern, not scattered noise. Diagnosis: raw natural-language questions ("What were Boeing's total current assets at the end of fiscal year 2024?") are mostly filler words that dilute both BM25 and dense-embedding relevance against terse balance-sheet table rows, even though the correct chunk is indexed and retrievable — a short query like `"total current assets"` finds it at rank 0 every time. This is exactly the workaround `/memo` had already stumbled into by using hand-written short queries per figure; query rewriting generalizes that fix to arbitrary questions. Full diagnosis and the three-way comparison: `CERTIFICATION_CHALLENGE.md` (Task 6).
+- **Query rewriting is a net win but not a free one.** It fixed 5 of hybrid's 6 failures (including, as a side effect, the RTX total-debt line-item issue below), but caused one regression (`lockheed_cash_2024`, a tolerance-boundary miss) and one new wrong-but-confident answer (`rtx_current_liabilities_2024`, which matched an unrelated same-labeled "Total X" row in a different footnote). See `CERTIFICATION_CHALLENGE.md` for the full accounting — faithfulness dropping further under query rewriting (0.576) is partly this real new failure mode, not just "the model attempts more answers."
+- **Faithfulness dropped under hybrid, and further under hybrid+rewrite** (0.777 → 0.708 → 0.576). Part of this is expected and even desirable: naive retrieval's higher score was partly a "faithful non-answer" artifact (correctly declining when given irrelevant context), and each retrieval improvement gives the model correct context to actually attempt more of the answers it used to decline. Part of it, at the rewrite stage specifically, is the new wrong-line-item failure mode above.
+- **The 0.5% tolerance can pass a technically-wrong figure that happens to be numerically close.** The original hybrid run's RTX total-debt answer stated $41,146M (a different, similarly-labeled "long-term debt" line item, not the correct $41,261M "Total debt" line) — within 0.28% of the truth, so it passed by coincidence. Query rewriting happened to fix this one specifically (see above), but the underlying tolerance-matching blind spot is a general, accepted property of tolerance-based numeric matching, not something any of these three pipelines fully closes.
 
 ### Running it yourself
 
@@ -194,6 +201,7 @@ cd backend && source .venv/bin/activate
 pip install -r ../evals/requirements.txt   # ragas + a langchain-community pin; not part of the deployed app
 python ../evals/run_evals.py --pipeline naive
 python ../evals/run_evals.py --pipeline hybrid
+python ../evals/run_evals.py --pipeline hybrid --rewrite
 ```
 
 Requires `OPENROUTER_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`, and `COHERE_API_KEY` (same as the rest of the app) in `backend/.env`. Each run takes a few minutes — 22 questions × (retrieval + answer generation) plus Ragas's own multi-step LLM evaluation per question.
@@ -206,7 +214,9 @@ Requires `OPENROUTER_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`, and `COHERE_API_K
 
 **Ambiguous-query retrieval.** Asking "What was Boeing's total revenue?" with naive dense retrieval sometimes surfaces segment-level revenue chunks (e.g. Global Services' $19,954M) alongside the true consolidated total ($66,517M), and the model has picked the wrong one. More specific phrasing ("total consolidated revenue") retrieves correctly. Naive top-8 dense search has no way to distinguish "the segment discussion that happens to also say Revenues" from "the consolidated total" — that's a retrieval precision problem, not a generation problem.
 
-Both are expected of single-pass LLM answering over naive dense retrieval, not bugs to silently patch around with more prompt engineering — they're exactly what Phase 4's numeric exact-match eval harness and hybrid retrieval (dense + BM25 + rerank) exist to catch and fix systematically, and part of the motivation for the memo feature (Phase 3) extracting figures into a structured, more constrained format instead of free-form chat answers.
+**Wrong-similarly-labeled-total risk (production, hybrid + query rewrite).** Query rewriting (Phase 5) fixed most of the current-assets/current-liabilities retrieval gap and, as a side effect, RTX's total-debt line-item confusion — but it also introduced this same failure mode in one new place: `rtx_current_liabilities_2024` now confidently cites an unrelated "Total X" row from a different footnote table instead of the balance sheet figure. A 10-K has many tables with similarly-labeled totals, and a short keyword query is more prone to matching the wrong one than a longer, specific question would be. Full detail in `CERTIFICATION_CHALLENGE.md` (Task 6). None of the numeric-tolerance check, Ragas faithfulness, or citation rendering catches "right magnitude, wrong line item" reliably — that would need an explicit label-matching verification step, noted as future work.
+
+These are expected of single-pass LLM answering over retrieval, not bugs to silently patch around with more prompt engineering — they're exactly what the eval harness (numeric exact-match + Ragas) exists to catch and measure systematically as retrieval keeps improving, and part of the motivation for the memo feature (Phase 3) extracting figures into a structured, more constrained format instead of free-form chat answers.
 
 ## Backend
 
@@ -317,4 +327,4 @@ Boeing gives the strongest story because credit risk connects directly to safety
 
 ## Next Build Phases
 
-1. **Phase 5**: submission polish — architecture diagrams, confirm no secrets committed, deployed smoke test, phone browser test.
+All build-spec phases (0-5) are complete. Ideas for beyond this submission are tracked in `CERTIFICATION_CHALLENGE.md`'s Task 7 (persistent checkpointer, larger/more adversarial golden set, citation-page precision, a label-matching verification step for retrieved figures, multi-year filings).
