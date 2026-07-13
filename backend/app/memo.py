@@ -1,10 +1,14 @@
-"""Phase 3: credit memo Financial Summary & Risk Factors section.
+"""Credit review memorandum, risks-first (Nichols style) per MEMO_TEMPLATE.md.
 
-Pipeline: targeted per-figure retrieval -> structured-output extraction of
-six key figures (each with its own page/section citation, null if not
-disclosed) -> ratio computation from whatever figures are non-null ->
-risk-factor retrieval -> a narrative generation call that is only allowed
-to use the figures and excerpts it was actually given.
+Pipeline: targeted per-figure retrieval -> structured-output figure
+extraction -> ratio computation (in code, never by the LLM) -> risk-factor +
+MD&A retrieval -> structured-output risk/mitigant extraction (exactly 3-5,
+each grounded in a citation) -> cash-flow retrieval -> narrative-sections
+generation (summary, borrower background, ratio interpretations, repayment
+considerations) -> deterministic template assembly in code. The LLM never
+writes the Analyst-Input Sections or the Sources list - those are fixed
+boilerplate / a deduplicated citation list assembled in code, so they can
+never be fabricated.
 """
 
 from typing import TypedDict
@@ -13,7 +17,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from app.agent.prompts import MEMO_EXTRACTION_PROMPT, MEMO_NARRATIVE_PROMPT
+from app.agent.prompts import (
+    MEMO_EXTRACTION_PROMPT,
+    MEMO_NARRATIVE_SECTIONS_PROMPT,
+    MEMO_RISK_EXTRACTION_PROMPT,
+)
 from app.config import get_settings
 from app.retrieval.dense import RetrievedChunk
 from app.retrieval.hybrid import retrieve
@@ -43,7 +51,25 @@ RATIO_LABELS = {
     "debt_to_revenue": "Debt-to-revenue ratio (total debt / revenue)",
 }
 
-RISK_QUERY = "principal credit risks liquidity risk factors financial condition"
+RISK_FACTORS_QUERY = "risk factors litigation regulatory competition supply chain"
+MDA_RISK_QUERY = "management discussion and analysis trends uncertainties challenges outlook"
+BORROWER_BACKGROUND_QUERY = "business overview segments products services operations"
+CASHFLOW_QUERY = "net cash provided used by operating activities cash flow from operations"
+
+# Static, never LLM-generated - MEMO_TEMPLATE.md Section 5 requires these headers
+# verbatim with no fabricated content, since deal-specific data doesn't exist yet.
+ANALYST_INPUT_SECTIONS = """- Loan structure & pricing: [REQUIRES DEAL DATA]
+- Collateral analysis: [REQUIRES DEAL DATA]
+- Risk rating & policy exceptions: [REQUIRES BANK POLICY + ANALYST JUDGMENT]"""
+
+FILING_METADATA = {
+    "boeing-2024-10k": {"filing_name": "Boeing FY2024 Form 10-K", "accession_number": "0000012927-25-000015"},
+    "lockheed-2024-10k": {
+        "filing_name": "Lockheed Martin FY2024 Form 10-K",
+        "accession_number": "0000936468-25-000009",
+    },
+    "rtx-2024-10k": {"filing_name": "RTX FY2024 Form 10-K", "accession_number": "0000101829-25-000005"},
+}
 
 
 class CitedFigure(BaseModel):
@@ -68,6 +94,32 @@ class Ratios(BaseModel):
     net_margin: float | None = None
     cash_to_debt: float | None = None
     debt_to_revenue: float | None = None
+
+
+class Risk(BaseModel):
+    risk: str = Field(description="A specific, borrower-specific risk statement grounded in a disclosure or ratio.")
+    mitigant: str = Field(
+        description='The disclosed mitigant/monitor, or exactly "No disclosed mitigant - flag for analyst."'
+    )
+    page: int | None = None
+    section: str | None = None
+
+
+class RiskAssessment(BaseModel):
+    risks: list[Risk] = Field(min_length=3, max_length=5)
+    omitted_note: str | None = Field(
+        None, description="Set only if more than 5 material risks existed in the excerpts."
+    )
+
+
+class NarrativeSections(BaseModel):
+    summary: str
+    borrower_background: str
+    current_ratio_interpretation: str
+    net_margin_interpretation: str
+    cash_to_debt_interpretation: str
+    debt_to_revenue_interpretation: str
+    repayment_considerations: str
 
 
 class Citation(TypedDict):
@@ -105,19 +157,27 @@ def _format_context(chunks: list[RetrievedChunk]) -> str:
     return "\n\n---\n\n".join(f"[page {c['page']}, section: {c['section']}]\n{c['text']}" for c in chunks)
 
 
-def _gather_figure_context(filing_id: str) -> tuple[list[RetrievedChunk], str | None, int | None]:
-    """Retrieve chunks for every key figure, deduped, plus infer company/fiscal_year."""
+def _dedupe_chunks(*chunk_lists: list[RetrievedChunk]) -> list[RetrievedChunk]:
     seen: dict[tuple, RetrievedChunk] = {}
-    company: str | None = None
-    fiscal_year: int | None = None
-    for query in FIGURE_QUERIES.values():
-        for chunk in retrieve(query, filing_id=filing_id, top_k=5):
+    for chunks in chunk_lists:
+        for chunk in chunks:
             key = (chunk["page"], chunk["section"], chunk["text"])
             seen.setdefault(key, chunk)
-            if company is None:
-                company = chunk["company"]
-                fiscal_year = chunk["fiscal_year"]
-    return list(seen.values()), company, fiscal_year
+    return list(seen.values())
+
+
+def _gather_figure_context(filing_id: str) -> tuple[list[RetrievedChunk], str | None, int | None]:
+    """Retrieve chunks for every key figure, deduped, plus infer company/fiscal_year."""
+    company: str | None = None
+    fiscal_year: int | None = None
+    all_chunks: list[list[RetrievedChunk]] = []
+    for query in FIGURE_QUERIES.values():
+        chunks = retrieve(query, filing_id=filing_id, top_k=5)
+        all_chunks.append(chunks)
+        if company is None and chunks:
+            company = chunks[0]["company"]
+            fiscal_year = chunks[0]["fiscal_year"]
+    return _dedupe_chunks(*all_chunks), company, fiscal_year
 
 
 def extract_figures(filing_id: str) -> tuple[FinancialFigures, list[RetrievedChunk], str | None, int | None]:
@@ -150,7 +210,7 @@ def _format_figures_for_prompt(figures: FinancialFigures) -> str:
         if figure.value is None:
             lines.append(f"- {label}: not disclosed in reviewed filings")
         else:
-            lines.append(f"- {label}: ${figure.value:,.0f} million (page {figure.page}, {figure.section})")
+            lines.append(f"- {label}: {_format_dollar_millions(figure.value)} (page {figure.page}, {figure.section})")
     return "\n".join(lines)
 
 
@@ -165,59 +225,168 @@ def _format_ratios_for_prompt(ratios: Ratios) -> str:
     return "\n".join(lines)
 
 
-def generate_narrative(
+def _format_risks_for_prompt(risks: RiskAssessment) -> str:
+    lines = []
+    for risk in risks.risks:
+        location = f"page {risk.page}, {risk.section}" if risk.page else "citation not available"
+        lines.append(f"- Risk: {risk.risk} | Mitigant: {risk.mitigant} | {location}")
+    return "\n".join(lines)
+
+
+def gather_risk_context(filing_id: str) -> list[RetrievedChunk]:
+    risk_factor_chunks = retrieve(RISK_FACTORS_QUERY, filing_id=filing_id, top_k=6)
+    mda_chunks = retrieve(MDA_RISK_QUERY, filing_id=filing_id, top_k=6)
+    return _dedupe_chunks(risk_factor_chunks, mda_chunks)
+
+
+def extract_risks(risk_chunks: list[RetrievedChunk], figures: FinancialFigures, ratios: Ratios) -> RiskAssessment:
+    context = (
+        f"Extracted figures:\n{_format_figures_for_prompt(figures)}\n\n"
+        f"Computed ratios:\n{_format_ratios_for_prompt(ratios)}\n\n"
+        f"Risk Factors and MD&A excerpts:\n{_format_context(risk_chunks)}"
+    )
+    structured = _get_model().with_structured_output(RiskAssessment, method="function_calling")
+    return structured.invoke(f"{MEMO_RISK_EXTRACTION_PROMPT}\n\n{context}")
+
+
+def generate_narrative_sections(
     company: str | None,
     fiscal_year: int | None,
     figures: FinancialFigures,
     ratios: Ratios,
-    risk_chunks: list[RetrievedChunk],
-) -> str:
+    risks: RiskAssessment,
+    background_chunks: list[RetrievedChunk],
+    cashflow_chunks: list[RetrievedChunk],
+) -> NarrativeSections:
     user_prompt = (
         f"Company: {company or 'unknown'}\n"
         f"Fiscal year: {fiscal_year or 'unknown'}\n\n"
-        f"Extracted figures (already verified against the filing):\n{_format_figures_for_prompt(figures)}\n\n"
+        f"Extracted figures:\n{_format_figures_for_prompt(figures)}\n\n"
         f"Computed ratios:\n{_format_ratios_for_prompt(ratios)}\n\n"
-        f"Risk factor excerpts:\n{_format_context(risk_chunks)}\n\n"
-        'Write the "Financial Summary & Risk Factors" section now.'
+        f"Already-identified key risks:\n{_format_risks_for_prompt(risks)}\n\n"
+        f"Borrower background excerpts:\n{_format_context(background_chunks)}\n\n"
+        f"Cash flow excerpts:\n{_format_context(cashflow_chunks)}"
     )
-    response = _get_model().invoke(
-        [SystemMessage(content=MEMO_NARRATIVE_PROMPT), HumanMessage(content=user_prompt)]
-    )
-    return response.content or ""
+    structured = _get_model().with_structured_output(NarrativeSections, method="function_calling")
+    return structured.invoke(f"{MEMO_NARRATIVE_SECTIONS_PROMPT}\n\n{user_prompt}")
 
 
-def _find_snippet(chunks: list[RetrievedChunk], page: int | None, section: str | None) -> str:
-    for chunk in chunks:
-        if chunk["page"] == page and chunk["section"] == section:
-            return chunk["text"][:300]
-    return ""
+def _format_dollar_millions(value: float) -> str:
+    sign = "-" if value < 0 else ""
+    return f"{sign}${abs(value):,.0f} million"
+
+
+def _figure_citation_line(key: str, figure: CitedFigure) -> str:
+    label = FIGURE_LABELS[key]
+    if figure.value is None:
+        return f"| {label} | Not disclosed in reviewed filings | — |"
+    return f"| {label} | {_format_dollar_millions(figure.value)} | page {figure.page}, {figure.section} |"
+
+
+def _assemble_markdown(
+    filing_id: str,
+    company: str | None,
+    fiscal_year: int | None,
+    figures: FinancialFigures,
+    ratios: Ratios,
+    risks: RiskAssessment,
+    sections: NarrativeSections,
+    citations: list[Citation],
+) -> str:
+    meta = FILING_METADATA.get(filing_id, {"filing_name": filing_id, "accession_number": "unknown"})
+    company_display = company or "Unknown company"
+    fy_display = fiscal_year or "unknown"
+
+    risk_lines = [f"- **Risk:** {r.risk} → **Mitigant/Monitor:** {r.mitigant}" for r in risks.risks]
+    if risks.omitted_note:
+        risk_lines.append(f"\n*{risks.omitted_note}*")
+
+    figures_table = "\n".join(
+        ["| Figure | Value | Source |", "|---|---|---|"]
+        + [_figure_citation_line(key, getattr(figures, key)) for key in FIGURE_LABELS]
+    )
+
+    ratio_rows = [
+        ("current_ratio", ratios.current_ratio, sections.current_ratio_interpretation),
+        ("net_margin", ratios.net_margin, sections.net_margin_interpretation),
+        ("cash_to_debt", ratios.cash_to_debt, sections.cash_to_debt_interpretation),
+        ("debt_to_revenue", ratios.debt_to_revenue, sections.debt_to_revenue_interpretation),
+    ]
+    ratio_lines = []
+    for key, value, interpretation in ratio_rows:
+        value_display = f"{value:.2f}" if value is not None else "not computable"
+        ratio_lines.append(f"- **{RATIO_LABELS[key]}**: {value_display} — {interpretation}")
+
+    sources_lines = [f"- Page {c['page']}, {c['section']}" for c in citations]
+
+    return f"""# CREDIT REVIEW MEMORANDUM — {company_display} (FY{fy_display})
+*Generated by CreditLens from {meta['filing_name']}, accession number {meta['accession_number']}. Draft for analyst review — not a credit decision.*
+
+## 1. Summary & Key Risks
+{sections.summary}
+
+{chr(10).join(risk_lines)}
+
+## 2. Borrower Background
+{sections.borrower_background}
+
+## 3. Financial Analysis
+
+{figures_table}
+
+**Ratios**
+
+{chr(10).join(ratio_lines)}
+
+## 4. Repayment Considerations
+{sections.repayment_considerations}
+
+## 5. Analyst-Input Sections
+{ANALYST_INPUT_SECTIONS}
+
+## 6. Sources
+{chr(10).join(sources_lines)}
+"""
 
 
 def generate_memo(filing_id: str) -> MemoResult:
     figures, figure_chunks, company, fiscal_year = extract_figures(filing_id)
     ratios = compute_ratios(figures)
-    risk_chunks = retrieve(RISK_QUERY, filing_id=filing_id, top_k=8)
-    narrative = generate_narrative(company, fiscal_year, figures, ratios, risk_chunks)
+
+    risk_chunks = gather_risk_context(filing_id)
+    risks = extract_risks(risk_chunks, figures, ratios)
+
+    background_chunks = retrieve(BORROWER_BACKGROUND_QUERY, filing_id=filing_id, top_k=5)
+    cashflow_chunks = retrieve(CASHFLOW_QUERY, filing_id=filing_id, top_k=5)
+
+    sections = generate_narrative_sections(
+        company, fiscal_year, figures, ratios, risks, background_chunks, cashflow_chunks
+    )
 
     citations: list[Citation] = []
-    seen_pages: set[tuple[int | None, str | None]] = set()
+    seen_locations: set[tuple[int | None, str | None]] = set()
+
+    def _add_citation(page: int | None, section: str | None, chunks: list[RetrievedChunk]) -> None:
+        location = (page, section)
+        if page is None or location in seen_locations:
+            return
+        seen_locations.add(location)
+        snippet = next((c["text"][:300] for c in chunks if c["page"] == page and c["section"] == section), "")
+        citations.append({"page": page, "section": section, "snippet": snippet})
+
     for key in FIGURE_LABELS:
         figure: CitedFigure = getattr(figures, key)
-        location = (figure.page, figure.section)
-        if figure.value is not None and location not in seen_pages:
-            seen_pages.add(location)
-            citations.append(
-                {
-                    "page": figure.page,
-                    "section": figure.section,
-                    "snippet": _find_snippet(figure_chunks, figure.page, figure.section),
-                }
-            )
-    for chunk in risk_chunks:
-        location = (chunk["page"], chunk["section"])
-        if location not in seen_pages:
-            seen_pages.add(location)
-            citations.append({"page": chunk["page"], "section": chunk["section"], "snippet": chunk["text"][:300]})
+        _add_citation(figure.page, figure.section, figure_chunks)
+    for risk in risks.risks:
+        _add_citation(risk.page, risk.section, risk_chunks)
+    for chunk in background_chunks:
+        _add_citation(chunk["page"], chunk["section"], background_chunks)
+    for chunk in cashflow_chunks:
+        _add_citation(chunk["page"], chunk["section"], cashflow_chunks)
+
+    citations.sort(key=lambda c: c["page"] or 0)
+
+    narrative = _assemble_markdown(filing_id, company, fiscal_year, figures, ratios, risks, sections, citations)
 
     return {
         "company": company,
