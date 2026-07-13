@@ -43,7 +43,7 @@ Three FY2024 10-K filings (Boeing, Lockheed Martin, RTX — an aerospace/defense
 
 ### Evaluation questions
 
-Rather than an ad hoc list, the actual evaluation set used throughout this build lives at [`data/golden/questions.jsonl`](data/golden/questions.jsonl) — 22 hand-written questions across the three filings: 18 numeric (asking for a specific figure, each backed by a hand-verified truth value in [`data/golden/numeric_truth.jsonl`](data/golden/numeric_truth.jsonl)) and 4 qualitative (asking about disclosed risks). A representative sample:
+Rather than an ad hoc list, the actual evaluation set used throughout this build lives at [`data/golden/questions.jsonl`](data/golden/questions.jsonl) — 27 hand-written questions across the three filings: 20 numeric (asking for a specific figure, each backed by a hand-verified truth value in [`data/golden/numeric_truth.jsonl`](data/golden/numeric_truth.jsonl)), 4 qualitative (asking about disclosed risks), and 3 refusal (a company-specific question paired with a *different* company's filing selected, testing that the agent declines rather than answering from general knowledge — see Task 6). Two of the 20 numeric questions are deliberately ambiguous phrasings that probe two specific, previously-documented failure modes: consolidated-vs-segment revenue, and net-loss-vs-net-loss-attributable-to-shareholders. A representative sample:
 
 | Question | Type |
 |---|---|
@@ -53,8 +53,11 @@ Rather than an ad hoc list, the actual evaluation set used throughout this build
 | What liquidity risks did Boeing disclose? | qualitative |
 | What does Boeing disclose about production disruptions related to the 737 MAX and FAA scrutiny? | qualitative |
 | What are Lockheed Martin's main risks related to its reliance on U.S. government contracts? | qualitative |
+| What was Boeing's total revenue? *(ambiguous phrasing — probes consolidated-vs-segment confusion)* | numeric |
+| What was Boeing's net loss? *(ambiguous phrasing — probes net-loss-vs-attributable confusion)* | numeric |
+| What was Lockheed Martin's total net sales in fiscal year 2024? *(asked with Boeing's filing selected)* | refusal |
 
-This same set is what Task 5's evaluation harness runs against.
+This same set is what Task 5's evaluation harness runs against. The two ambiguity probes and the three refusal questions are additionally verified directly against the live production agent rather than the simplified eval-only pipeline, since both test agent-level behavior (query handling, filing-scope enforcement) more than pure retrieval quality — see `evals/results/ambiguity_probe_check.md` and `evals/results/refusal_check.md`.
 
 ---
 
@@ -254,6 +257,24 @@ So the aggregate faithfulness drop (0.708 → 0.576) is not just a side effect o
 
 (Full per-question detail: [`evals/results/hybrid-rewrite_results.md`](evals/results/hybrid-rewrite_results.md).)
 
+### Improvement 3 — Filing-scoped refusal (cross-company leak)
+
+**Why this should help this specific use case**: `retrieve_filing` is already filtered to the selected `filing_id` at the Qdrant level, but nothing stopped the LLM itself from answering a question about a *different* company from its own training data — a serious problem for a credit tool specifically, where a wrong-but-confident competitor figure with a fabricated citation is worse than no answer at all.
+
+Testing this directly (asking about Company B's numbers while Company A's filing was selected) confirmed the leak, and confirmed it was worse than plain hallucination: the model stated real, correctly-remembered figures for the other company, each with page/section citations — but those citations were retrieved from the *selected* (wrong) company's filing, so they were flatly mismatched to the number they were attached to.
+
+| Filing selected | Asked about | Before (original prompt) | After (Fix 1) |
+|---|---|---|---|
+| Boeing | Lockheed Martin net sales | "$71.0 billion (page 59, Net Sales section...)" — a real figure, wrong-filing citation | "The selected filing_id is for Boeing's 2024 10-K, which does not cover Lockheed Martin's financial figures... switch the filing selector to lockheed-2024-10k." |
+| Lockheed Martin | RTX total debt | "$43.5 billion... (page 153, 172)..." — wrong-filing citation | "It does not cover RTX... switch the filing selector to rtx-2024-10k." |
+| RTX | Boeing net loss | "$11.829 billion (page 40, Other Earnings Items...)" — wrong-filing citation | "The selected filing_id is for RTX, not Boeing... switch the filing selector to \"boeing-2024-10k\"." |
+
+**Refusal-correct: 0/3 before, 3/3 after** (heuristic: no dollar figure stated for the other company, plus explicit redirect language — [`evals/refusal_eval.py`](evals/refusal_eval.py)). Same-company questions were re-verified after the fix to confirm no regression: asking Boeing's own revenue/net-loss with Boeing's filing selected still answers and cites correctly.
+
+Fix: `AGENT_SYSTEM_PROMPT` ([`backend/app/agent/prompts.py`](backend/app/agent/prompts.py)) now states the `filing_id`-to-company mapping explicitly and instructs the model to decline and redirect for any company-specific question about a different company than the one selected — "even if you already know the figure from general knowledge, and even if retrieve_filing returns some excerpt that happens to mention the other company in passing."
+
+Full per-question detail and methodology notes: [`evals/results/refusal_check.md`](evals/results/refusal_check.md).
+
 ### Three-way comparison
 
 | Metric | Naive dense | Hybrid | Hybrid + query rewrite |
@@ -279,6 +300,7 @@ So the aggregate faithfulness drop (0.708 → 0.576) is not just a side effect o
 - **Persistent memory.** `MemorySaver` is in-memory and keyed per-process — fine for a single-instance deployment, but a Railway redeploy or restart drops all thread history. A Postgres-backed LangGraph checkpointer would make memory survive deploys.
 - **More filings and multi-year data.** Real credit analysis is trend-driven (is leverage rising or falling year over year?), and this build only ingests a single fiscal year per company.
 - **Latency of the query-rewrite step.** It adds one more LLM round-trip before every retrieval call. A smaller/faster model for that specific step (or caching rewrites for repeated question patterns) would be worth measuring against the accuracy gain it provides.
+- **Ragas harness reliability on larger question sets.** Two attempts to re-run the full retrieval-comparison harness against an expanded 24-question set hung partway through Ragas's internal scoring (confirmed via near-zero CPU and a stalled progress bar, not a code exception) — a real, reproducible reliability gap, not just this write-up's own bad luck. Worth root-causing (likely a specific input triggering a stuck network call inside Ragas's own multi-generation sampling) before scaling the golden set further, since "the eval harness hangs on larger inputs" undermines the whole point of having a fast, trustworthy regression gate.
 
 ---
 

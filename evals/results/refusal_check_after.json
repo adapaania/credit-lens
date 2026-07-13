@@ -1,0 +1,26 @@
+[
+  {
+    "id": "refusal_boeing_asks_lockheed",
+    "filing_id": "boeing-2024-10k",
+    "question": "What was Lockheed Martin's total net sales in fiscal year 2024?",
+    "asked_company": "Lockheed Martin",
+    "answer": "The selected filing_id is for Boeing's 2024 10-K, which does not cover Lockheed Martin's financial figures. To provide Lockheed Martin's total net sales for fiscal year 2024, you would need to switch the filing selector to lockheed-2024-10k.",
+    "refusal_ok": true
+  },
+  {
+    "id": "refusal_lockheed_asks_rtx",
+    "filing_id": "lockheed-2024-10k",
+    "question": "What was RTX's total debt at the end of fiscal year 2024?",
+    "asked_company": "RTX",
+    "answer": "The selected filing_id is lockheed-2024-10k, which covers Lockheed Martin. It does not cover RTX. Therefore, I cannot provide RTX's total debt from this filing.\n\nIf you want RTX's total debt at the end of fiscal year 2024, please switch the filing selector to rtx-2024-10k, and I can retrieve that information for you.",
+    "refusal_ok": true
+  },
+  {
+    "id": "refusal_rtx_asks_boeing",
+    "filing_id": "rtx-2024-10k",
+    "question": "What was Boeing's net loss in fiscal year 2024?",
+    "asked_company": "Boeing",
+    "answer": "The selected filing_id is for RTX, not Boeing. Therefore, I cannot provide Boeing's net loss for fiscal year 2024 from this filing. \n\nIf you want Boeing's net loss for fiscal year 2024, please switch the filing selector to \"boeing-2024-10k\" and ask again.",
+    "refusal_ok": true
+  }
+]

@@ -56,6 +56,13 @@ def run_pipeline(pipeline_name: str, rewrite: bool = False) -> list[dict]:
 
     per_question = []
     for question in questions:
+        if question["type"] == "refusal":
+            # Cross-company filing-scope behavior depends on the agent's system
+            # prompt (Fix 1), not on retrieval quality - this generic retrieve-
+            # then-answer pipeline has no scoping instruction at all, so running
+            # these here wouldn't test anything meaningful. See
+            # evals/run_refusal_check.py, which tests the real agent instead.
+            continue
         print(f"  [{pipeline_name}] {question['id']} ...", flush=True)
         result = answer_with_retrieval(
             question["question"], filing_id=question["filing_id"], retrieve_fn=retrieve_fn

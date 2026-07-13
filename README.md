@@ -53,14 +53,16 @@ creditlens/
 ├── data/
 │   ├── filings/                   # Boeing, Lockheed, RTX FY2024 10-K PDFs
 │   └── golden/
-│       ├── questions.jsonl        # 22 golden questions (18 numeric, 4 qualitative)
+│       ├── questions.jsonl        # 27 golden questions (20 numeric, 4 qualitative, 3 refusal)
 │       └── numeric_truth.jsonl    # hand-verified figures, cross-checked against source text
 ├── evals/
 │   ├── pipeline.py                # shared retrieve -> answer flow (not the agent)
 │   ├── numeric_eval.py            # unit/scale normalization, 0.5% tolerance matching
+│   ├── refusal_eval.py            # heuristic: does an answer decline + redirect, with no leaked figure
 │   ├── cohere_langchain_embeddings.py  # LangChain Embeddings shim around our Cohere client
-│   ├── run_evals.py               # orchestrator: python evals/run_evals.py --pipeline naive|hybrid
-│   └── results/                   # naive/hybrid/hybrid-rewrite_results.{json,md}
+│   ├── run_evals.py               # orchestrator: python evals/run_evals.py --pipeline naive|hybrid [--rewrite]
+│   ├── run_refusal_check.py       # runs refusal-type questions through the live agent, not the eval pipeline
+│   └── results/                   # naive/hybrid/hybrid-rewrite_results.{json,md}, refusal_check*, ambiguity_probe_check.md
 ├── scripts/
 │   ├── ingest.py                  # parse -> chunk -> index each filing
 │   └── smoke_test.py              # Checks /health and /chat
@@ -120,6 +122,8 @@ Two tools (`backend/app/agent/tools.py`):
 
 Routing and citation rules live in `backend/app/agent/prompts.py`: filing figures need a `(page N, section)` citation, Tavily results are described as external context and never presented as filing data, and conflicting sources get an explicit source-boundary explanation.
 
+**Filing-scope refusal (Fix 1)**: the system prompt states the `filing_id`-to-company mapping explicitly and instructs the model to decline and redirect if a question is about a *different* company than the one covered by the selected filing — even if the model already knows the figure from general knowledge. This closes a real, verified leak: before the fix, asking about Company B's numbers while Company A's filing was selected returned a real, correctly-remembered figure for Company B, cited with a page/section number that was actually retrieved from Company A's filing — a citation-integrity failure, not just a hallucination, since `retrieve_filing` is already scoped to the selected `filing_id` at the Qdrant level and had no way to catch this. Before/after evidence (0/3 correct refusals → 3/3): `evals/results/refusal_check.md`.
+
 **`thread_id` vs `filing_id`**: the frontend generates one `thread_id` per browser session (`localStorage`) but `filing_id` comes from the dropdown and can change on any message. Since a conversation can span multiple filings, `filing_id` isn't baked into a one-time system prompt — it travels inline with every message as `[Selected filing_id: ...]`, while the system prompt (routing/citation rules) is added once per thread.
 
 **Citation extraction**: the graph's chat-completion loop doesn't hand back structured citations on its own — only conversational text. `run_agent()` recovers them by matching page numbers actually mentioned in the final answer against every `retrieve_filing` tool result seen anywhere in the thread so far (keyed by `filing_id` + page). This was a deliberate fix: an earlier version only looked at the current turn's tool calls, which produced an empty `citations` array whenever the model answered a follow-up from conversation memory instead of calling `retrieve_filing` again — even though the answer text still said "(page 36, ...)". Matching against mentioned page numbers works whether or not a fresh tool call happened this turn.
@@ -160,7 +164,11 @@ The frontend's "Draft memo section" button (next to the filing selector) posts t
 
 ### Golden dataset
 
-`data/golden/questions.jsonl` has 22 questions across all three filings: 18 numeric (6 key figures × 3 companies) and 4 qualitative (risk-factor style). `data/golden/numeric_truth.jsonl` holds the ground truth for the numeric ones.
+`data/golden/questions.jsonl` has 27 questions across all three filings: 18 numeric (6 key figures × 3 companies), 4 qualitative (risk-factor style), 2 deliberately-ambiguous numeric probes (see below), and 3 refusal questions (a company-specific question paired with a different company's filing selected). `data/golden/numeric_truth.jsonl` holds the ground truth for the numeric ones — the two ambiguous probes reuse existing truth entries since they're testing phrasing sensitivity on figures already verified, not new figures.
+
+The two ambiguous probes exist specifically to regression-test the two failure modes documented earlier in this file: `boeing_revenue_ambiguous` ("What was Boeing's total revenue?", no "consolidated" qualifier) and `boeing_net_loss_ambiguous` ("What was Boeing's net loss?", no "attributable to shareholders" qualifier). Run directly against the live production agent (not the eval-only pipeline) and scored with `numeric_eval.py`'s own matcher, both now resolve correctly — the revenue question returns the consolidated $66,517M rather than a segment figure, and the net-loss question distinguishes both real, differently-labeled figures rather than picking one ($11,829M "Net loss" vs. $11,817M "Net loss attributable to Boeing shareholders"). Full detail and a note on why this ran against the agent directly rather than through the full comparison harness: `evals/results/ambiguity_probe_check.md`.
+
+The 3 refusal questions test something the retrieval-comparison harness below can't: whether the agent leaks a competitor's figures from general knowledge when the *wrong* filing is selected. See "Fix 1" in the retrieval section below and `evals/results/refusal_check.md` for the full before/after.
 
 Every numeric truth value was hand cross-checked against the actual filing text, not just trusted from a pipeline's own output — this caught a real bug along the way: RTX's Phase 3 memo extraction had returned $41,146M for "total debt," but the filing's own explicit "Total debt" line (in its Liquidity and Financial Condition discussion) states $41,261M — the extracted figure was actually "Total principal long-term debt" from a debt-maturity note, a different, similarly-labeled line item. The golden truth uses the correct $41,261M; the eval results below reflect that, not a value that would make either pipeline look artificially better.
 

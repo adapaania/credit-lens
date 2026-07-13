@@ -12,6 +12,7 @@ type Message = {
   role: "user" | "assistant";
   content: string;
   citations?: Citation[];
+  isMemo?: boolean;
 };
 
 const filings = [
@@ -27,7 +28,7 @@ export default function Home() {
     {
       role: "assistant",
       content:
-        "Ask a credit question about a selected SEC filing. Phase 0 is wired as an echo test; RAG comes next.",
+        "Select a filing and ask a credit question — e.g., \"What was total revenue in FY2024?\"",
     },
   ]);
   const [isLoading, setIsLoading] = useState(false);
@@ -78,6 +79,7 @@ export default function Home() {
           role: "assistant",
           content: data.narrative,
           citations: data.citations ?? [],
+          isMemo: true,
         },
       ]);
     } catch (requestError) {
@@ -87,6 +89,16 @@ export default function Home() {
     } finally {
       setIsLoading(false);
     }
+  }
+
+  function handleDownloadMemo(narrative: string) {
+    const blob = new Blob([narrative], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${selectedFiling}-memo.md`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -191,6 +203,15 @@ export default function Home() {
                       </p>
                     ))}
                   </div>
+                ) : null}
+                {message.isMemo ? (
+                  <button
+                    type="button"
+                    className="mt-3 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-950 shadow-sm"
+                    onClick={() => handleDownloadMemo(message.content)}
+                  >
+                    Download memo (.md)
+                  </button>
                 ) : null}
               </article>
             ))}

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "refusal_boeing_asks_lockheed",
+    "filing_id": "boeing-2024-10k",
+    "question": "What was Lockheed Martin's total net sales in fiscal year 2024?",
+    "asked_company": "Lockheed Martin",
+    "answer": "Lockheed Martin's total net sales in fiscal year 2024 were $71.0 billion (page 59, Net Sales section; page 122, Overview; page 95, Years Ended December 31 section).",
+    "refusal_ok": false
+  },
+  {
+    "id": "refusal_lockheed_asks_rtx",
+    "filing_id": "lockheed-2024-10k",
+    "question": "What was RTX's total debt at the end of fiscal year 2024?",
+    "asked_company": "RTX",
+    "answer": "RTX's total long-term debt (excluding finance leases) at the end of fiscal year 2024 was approximately $43.5 billion (carrying amount) with a fair value of about $41.6 billion. The weighted-average interest rate on total debt was 4.5%, and the average maturity of the long-term debt was approximately 12 years. The schedule of principal payments required on long-term debt totaled $41.1 billion, with additional future interest payments expected (page 153, 172).\n\nThere were no borrowings outstanding under the revolving credit agreement or commercial paper borrowings as of December 31, 2024 (page 98).\n\nSo, the total debt figure to consider is the long-term debt carrying amount of $43.5 billion as of the end of 2024.",
+    "refusal_ok": false
+  },
+  {
+    "id": "refusal_rtx_asks_boeing",
+    "filing_id": "rtx-2024-10k",
+    "question": "What was Boeing's net loss in fiscal year 2024?",
+    "asked_company": "Boeing",
+    "answer": "Boeing's net loss in fiscal year 2024 was $11.829 billion (page 40, Other Earnings Items; page 57, Cash Flow Summary; page 73, Consolidated Statements of Comprehensive Income).",
+    "refusal_ok": false
+  }
+]
