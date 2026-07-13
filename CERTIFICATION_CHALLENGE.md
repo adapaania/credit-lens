@@ -207,6 +207,8 @@ Only one in three numeric questions was answered correctly. The low **context pr
 
 ### Improvement 1 — Advanced retriever: naive dense → hybrid
 
+**Why this should help this specific use case**: 10-K financial statements are dense with exact, short, repeated labels ("Total debt," "Total current assets") that a lexical/keyword signal like BM25 can match precisely, while dense embeddings alone are better at conceptual similarity than at pinpointing one exact line among many similarly-worded ones — so fusing the two, then reranking with a model trained specifically to judge relevance, should recover the cases naive dense retrieval misses without giving up its strengths on the qualitative, narrative-style questions (e.g. risk factors) where semantic similarity already does well.
+
 Naive dense retrieval (top-8 cosine similarity) was replaced with a hybrid pipeline in [`backend/app/retrieval/hybrid.py`](backend/app/retrieval/hybrid.py): dense (top-20) and BM25 (top-20) candidates are fused with reciprocal rank fusion (k=60), the fused top-20 is reranked with Cohere Rerank (`rerank-v3.5`) down to a final top-6.
 
 | Metric | Naive dense | Hybrid (dense + BM25 + rerank) | Change |
