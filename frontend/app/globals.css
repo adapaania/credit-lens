@@ -17,3 +17,22 @@ input,
 select {
   font: inherit;
 }
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .memo-document,
+  .memo-document * {
+    visibility: visible;
+  }
+  .memo-document {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+  @page {
+    margin: 20mm;
+  }
+}
