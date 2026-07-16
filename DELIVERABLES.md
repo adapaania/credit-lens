@@ -61,6 +61,6 @@ Line numbers reference the current `main` branch.
 | Points | Deliverable | Evidence |
 | ---: | --- | --- |
 | 10 | Public GitHub repo | <https://github.com/adapaania/credit-lens> |
-| 10 | <=10-minute Loom demo video, live demo + use case | Recorded separately on Loom; not tracked in this repo |
+| 10 | <=10-minute Loom demo video, live demo + use case | <https://www.loom.com/share/13f3332517bb42568cab1fa0a4d6087f> |
 | 10 | Written document addressing each deliverable | [`CERTIFICATION_CHALLENGE.md`](CERTIFICATION_CHALLENGE.md), in-repo write-up, and [`CERTIFICATION_CHALLENGE.pdf`](CERTIFICATION_CHALLENGE.pdf), the same content as a submission-ready PDF |
 | 0 | All relevant code | This repository: `backend/`, `frontend/`, `evals/`, `scripts/`, and `data/` |
